@@ -37,6 +37,7 @@ import io.livekit.android.room.participant.ParticipantTrackPermission
 import io.livekit.android.room.track.TrackException
 import io.livekit.android.room.util.MediaConstraintKeys
 import io.livekit.android.room.util.createAnswer
+import io.livekit.android.room.util.mungeOpusStereo
 import io.livekit.android.room.util.setLocalDescription
 import io.livekit.android.room.util.waitUntilConnected
 import io.livekit.android.util.CloseableCoroutineScope
@@ -1129,7 +1130,24 @@ internal constructor(
                 return@launch
             }
 
+            // Receive stereo where the sender publishes it: stereo=1 on the Opus fmtp of every
+            // section the offer marks sprop-stereo=1 (mungeOpusStereo). Without it the Opus decoder
+            // is mono whatever arrives. An answer the peer connection refuses falls back to the plain one.
+            val stereoAnswer = mungeOpusStereo(answer.description, sessionDescription.description)
+                .takeIf { it != answer.description }
+                ?.let { SessionDescription(answer.type, it) }
+            var sentAnswer = answer
             run<Unit> {
+                if (stereoAnswer != null) {
+                    when (val outcome = subscriber?.withPeerConnection { setLocalDescription(stereoAnswer) }.nullSafe()) {
+                        is Either.Left -> {
+                            sentAnswer = stereoAnswer
+                            return@run
+                        }
+
+                        is Either.Right -> LKLog.w { "stereo answer refused, using the plain one: ${outcome.value}" }
+                    }
+                }
                 when (val outcome = subscriber?.withPeerConnection { setLocalDescription(answer) }.nullSafe()) {
                     is Either.Left -> Unit
                     is Either.Right -> {
@@ -1142,7 +1160,7 @@ internal constructor(
             if (isClosed) {
                 return@launch
             }
-            client.sendAnswer(answer, offerId)
+            client.sendAnswer(sentAnswer, offerId)
         }
     }
 
